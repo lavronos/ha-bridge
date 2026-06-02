@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -11,9 +12,12 @@ from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_track_time_interval
 
 from .api import LavronOSApiClient, LavronOSApiError
 from .const import LOGGER
+
+SNAPSHOT_INTERVAL = timedelta(minutes=1)
 
 
 class LavronOSBridgeCoordinator:
@@ -25,10 +29,12 @@ class LavronOSBridgeCoordinator:
         self.entry = entry
         self.client = client
         self._unsub_state_changed: Callable[[], None] | None = None
+        self._unsub_snapshot_refresh: Callable[[], None] | None = None
 
     async def async_start(self) -> None:
         """Start the bridge."""
         self._unsub_state_changed = self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._async_state_changed)
+        self._unsub_snapshot_refresh = async_track_time_interval(self.hass, self._async_refresh_snapshot, SNAPSHOT_INTERVAL)
         await self.async_push_snapshot()
 
     async def async_unload(self) -> None:
@@ -36,6 +42,9 @@ class LavronOSBridgeCoordinator:
         if self._unsub_state_changed is not None:
             self._unsub_state_changed()
             self._unsub_state_changed = None
+        if self._unsub_snapshot_refresh is not None:
+            self._unsub_snapshot_refresh()
+            self._unsub_snapshot_refresh = None
 
     async def async_push_snapshot(self) -> None:
         """Collect and send an initial Home Assistant snapshot."""
@@ -62,6 +71,11 @@ class LavronOSBridgeCoordinator:
         }
 
         self.hass.async_create_task(self._async_push_state_event(payload))
+
+    @callback
+    def _async_refresh_snapshot(self, _now: Any) -> None:
+        """Refresh registry snapshots so LavronOS catches room/device changes without re-pairing."""
+        self.hass.async_create_task(self.async_push_snapshot())
 
     async def _async_push_state_event(self, payload: dict[str, Any]) -> None:
         """Push a state change payload to LavronOS."""
@@ -113,67 +127,99 @@ class LavronOSBridgeCoordinator:
         entities = _registry_values(entity_registry, "entities")
 
         return (
-            {getattr(entity, "entity_id", None): entity for entity in entities if getattr(entity, "entity_id", None)},
-            {getattr(device, "id", None): device for device in devices if getattr(device, "id", None)},
-            {getattr(area, "id", None): area for area in areas if getattr(area, "id", None)},
+            {_registry_id(entity, "entity_id", "entityId"): entity for entity in entities if _registry_id(entity, "entity_id", "entityId")},
+            {_registry_id(device, "id", "device_id", "deviceId"): device for device in devices if _registry_id(device, "id", "device_id", "deviceId")},
+            {_registry_id(area, "id", "area_id", "areaId"): area for area in areas if _registry_id(area, "id", "area_id", "areaId")},
         )
 
 
 def _registry_values(registry: Any, attr: str) -> list[Any]:
     """Return values from a Home Assistant registry internal mapping."""
     values = getattr(registry, attr, {})
-    if isinstance(values, dict):
-        return list(values.values())
-    return list(values)
+    if values is None:
+        return []
+    if isinstance(values, Mapping):
+        return [{"__registry_key": str(key), "__registry_value": value} for key, value in values.items()]
+    return [{"__registry_key": None, "__registry_value": value} for value in list(values)]
+
+
+def _registry_id(entry: Any, *names: str) -> str | None:
+    """Return the stable Home Assistant registry id, falling back to mapping keys."""
+    value = _registry_field(entry, *names)
+    if value is None and isinstance(entry, Mapping):
+        value = entry.get("__registry_key")
+    if value is None:
+        return None
+    return str(value)
+
+
+def _registry_field(entry: Any, *names: str) -> Any:
+    """Read a registry field from Home Assistant objects or dict-backed entries."""
+    value = entry
+    if isinstance(entry, Mapping) and "__registry_value" in entry:
+        value = entry.get("__registry_value")
+
+    if isinstance(value, Mapping):
+        for name in names:
+            field = value.get(name)
+            if field is not None:
+                return field
+        return None
+
+    for name in names:
+        field = getattr(value, name, None)
+        if field is not None:
+            return field
+    return None
 
 
 def _serialize_area(area: Any) -> dict[str, Any]:
     """Serialize an area registry entry."""
     return {
-        "id": getattr(area, "id", None),
-        "name": getattr(area, "name", None),
-        "aliases": sorted(getattr(area, "aliases", []) or []),
-        "floorId": getattr(area, "floor_id", None),
-        "icon": getattr(area, "icon", None),
-        "picture": getattr(area, "picture", None),
+        "id": _registry_id(area, "id", "area_id", "areaId"),
+        "name": _registry_field(area, "name"),
+        "aliases": sorted(_registry_field(area, "aliases") or []),
+        "floorId": _registry_field(area, "floor_id", "floorId"),
+        "icon": _registry_field(area, "icon"),
+        "picture": _registry_field(area, "picture"),
     }
 
 
 def _serialize_device(device: Any) -> dict[str, Any]:
     """Serialize a device registry entry."""
     return {
-        "id": getattr(device, "id", None),
-        "areaId": getattr(device, "area_id", None),
-        "name": getattr(device, "name", None),
-        "nameByUser": getattr(device, "name_by_user", None),
-        "manufacturer": getattr(device, "manufacturer", None),
-        "model": getattr(device, "model", None),
-        "modelId": getattr(device, "model_id", None),
-        "swVersion": getattr(device, "sw_version", None),
-        "hwVersion": getattr(device, "hw_version", None),
-        "entryType": _enum_value(getattr(device, "entry_type", None)),
-        "disabledBy": _enum_value(getattr(device, "disabled_by", None)),
-        "identifiers": _serialize_tuple_set(getattr(device, "identifiers", set())),
-        "connections": _serialize_tuple_set(getattr(device, "connections", set())),
-        "configEntries": sorted(getattr(device, "config_entries", []) or []),
+        "id": _registry_id(device, "id", "device_id", "deviceId"),
+        "areaId": _registry_field(device, "area_id", "areaId"),
+        "name": _registry_field(device, "name"),
+        "nameByUser": _registry_field(device, "name_by_user", "nameByUser"),
+        "manufacturer": _registry_field(device, "manufacturer"),
+        "model": _registry_field(device, "model"),
+        "modelId": _registry_field(device, "model_id", "modelId"),
+        "swVersion": _registry_field(device, "sw_version", "swVersion"),
+        "hwVersion": _registry_field(device, "hw_version", "hwVersion"),
+        "entryType": _enum_value(_registry_field(device, "entry_type", "entryType")),
+        "disabledBy": _enum_value(_registry_field(device, "disabled_by", "disabledBy")),
+        "identifiers": _serialize_tuple_set(_registry_field(device, "identifiers") or set()),
+        "connections": _serialize_tuple_set(_registry_field(device, "connections") or set()),
+        "configEntries": sorted(_registry_field(device, "config_entries", "configEntries") or []),
     }
 
 
 def _serialize_entity(entity: Any) -> dict[str, Any]:
     """Serialize an entity registry entry."""
     return {
-        "entityId": getattr(entity, "entity_id", None),
-        "uniqueId": getattr(entity, "unique_id", None),
-        "platform": getattr(entity, "platform", None),
-        "domain": getattr(entity, "domain", None),
-        "deviceId": getattr(entity, "device_id", None),
-        "areaId": getattr(entity, "area_id", None),
-        "name": getattr(entity, "name", None),
-        "originalName": getattr(entity, "original_name", None),
-        "icon": getattr(entity, "icon", None),
-        "entityCategory": _enum_value(getattr(entity, "entity_category", None)),
-        "disabledBy": _enum_value(getattr(entity, "disabled_by", None)),
-        "hiddenBy": _enum_value(getattr(entity, "hidden_by", None)),
+        "entityId": _registry_id(entity, "entity_id", "entityId"),
+        "uniqueId": _registry_field(entity, "unique_id", "uniqueId"),
+        "platform": _registry_field(entity, "platform"),
+        "domain": _registry_field(entity, "domain"),
+        "deviceId": _registry_field(entity, "device_id", "deviceId"),
+        "areaId": _registry_field(entity, "area_id", "areaId"),
+        "name": _registry_field(entity, "name"),
+        "originalName": _registry_field(entity, "original_name", "originalName"),
+        "icon": _registry_field(entity, "icon"),
+        "entityCategory": _enum_value(_registry_field(entity, "entity_category", "entityCategory")),
+        "disabledBy": _enum_value(_registry_field(entity, "disabled_by", "disabledBy")),
+        "hiddenBy": _enum_value(_registry_field(entity, "hidden_by", "hiddenBy")),
     }
 
 
@@ -190,12 +236,12 @@ def _serialize_state(
     if isinstance(state, State):
         data = dict(state.as_dict())
         entity = (entity_by_id or {}).get(state.entity_id)
-        device_id = getattr(entity, "device_id", None) if entity is not None else None
+        device_id = _registry_field(entity, "device_id", "deviceId") if entity is not None else None
         device = (device_by_id or {}).get(device_id)
-        area_id = getattr(entity, "area_id", None) if entity is not None else None
+        area_id = _registry_field(entity, "area_id", "areaId") if entity is not None else None
 
         if area_id is None and device is not None:
-            area_id = getattr(device, "area_id", None)
+            area_id = _registry_field(device, "area_id", "areaId")
 
         area = (area_by_id or {}).get(area_id)
 
@@ -207,12 +253,12 @@ def _serialize_state(
                 "deviceId": device_id,
                 "deviceName": _device_name(device),
                 "areaId": area_id,
-                "areaName": getattr(area, "name", None) if area is not None else None,
-                "registryName": getattr(entity, "name", None) if entity is not None else None,
-                "originalName": getattr(entity, "original_name", None) if entity is not None else None,
-                "entityCategory": _enum_value(getattr(entity, "entity_category", None)) if entity is not None else None,
-                "disabledBy": _enum_value(getattr(entity, "disabled_by", None)) if entity is not None else None,
-                "hiddenBy": _enum_value(getattr(entity, "hidden_by", None)) if entity is not None else None,
+                "areaName": _registry_field(area, "name") if area is not None else None,
+                "registryName": _registry_field(entity, "name") if entity is not None else None,
+                "originalName": _registry_field(entity, "original_name", "originalName") if entity is not None else None,
+                "entityCategory": _enum_value(_registry_field(entity, "entity_category", "entityCategory")) if entity is not None else None,
+                "disabledBy": _enum_value(_registry_field(entity, "disabled_by", "disabledBy")) if entity is not None else None,
+                "hiddenBy": _enum_value(_registry_field(entity, "hidden_by", "hiddenBy")) if entity is not None else None,
             }
         )
         return data
@@ -226,11 +272,11 @@ def _device_name(device: Any | None) -> str | None:
         return None
 
     return (
-        getattr(device, "name_by_user", None)
-        or getattr(device, "name", None)
-        or getattr(device, "original_name", None)
-        or getattr(device, "default_name", None)
-        or getattr(device, "model", None)
+        _registry_field(device, "name_by_user", "nameByUser")
+        or _registry_field(device, "name")
+        or _registry_field(device, "original_name", "originalName")
+        or _registry_field(device, "default_name", "defaultName")
+        or _registry_field(device, "model")
     )
 
 

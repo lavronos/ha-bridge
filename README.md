@@ -17,6 +17,7 @@ Implemented:
 - Pairing with LavronOS through `POST /api/ha/pair`.
 - Bridge token storage in the Home Assistant config entry.
 - Initial Home Assistant snapshot push to LavronOS with area, device and entity registry context.
+- Periodic snapshot refresh so LavronOS catches area, device and entity registry changes without disconnecting and re-pairing the bridge.
 - Realtime `state_changed` event push to LavronOS with friendly names and registry context.
 - Diagnostics with sensitive token redaction.
 
@@ -82,7 +83,7 @@ The bridge token is stored inside Home Assistant config entry data. Home Assista
 
 ## Snapshot
 
-After setup, the bridge collects and sends an initial snapshot to LavronOS:
+After setup, the bridge collects and sends an initial snapshot to LavronOS. It also refreshes the snapshot periodically while the integration is loaded, so new spaces, devices and registry changes can appear in LavronOS without creating a new pairing code.
 
 ```http
 POST {lavronos_url}/api/ha/snapshot

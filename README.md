@@ -16,8 +16,8 @@ Implemented:
 - Home Assistant UI config flow.
 - Pairing with LavronOS through `POST /api/ha/pair`.
 - Bridge token storage in the Home Assistant config entry.
-- Initial Home Assistant snapshot push to LavronOS.
-- Realtime `state_changed` event push to LavronOS.
+- Initial Home Assistant snapshot push to LavronOS with area, device and entity registry context.
+- Realtime `state_changed` event push to LavronOS with friendly names and registry context.
 - Diagnostics with sensitive token redaction.
 
 Not implemented yet:
@@ -99,6 +99,7 @@ Snapshot includes:
 - Scenes.
 - Scripts.
 - Automations.
+- Registry-derived area and device context on state rows so LavronOS can group entities into understandable rooms and devices.
 
 ## Realtime Updates
 

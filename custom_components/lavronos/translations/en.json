@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect LavronOS",
+        "description": "Enter the LavronOS web URL and the pairing code generated in LavronOS. This is not the Home Assistant URL.",
+        "data": {
+          "lavronos_url": "LavronOS URL",
+          "pairing_code": "Pairing code"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to LavronOS.",
+      "invalid_pairing_code": "The pairing code is invalid or expired.",
+      "invalid_url": "Enter a valid LavronOS HTTP or HTTPS URL.",
+      "unknown": "Unexpected error."
+    }
+  }
+}

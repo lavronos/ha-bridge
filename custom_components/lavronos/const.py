@@ -6,7 +6,7 @@ from logging import Logger, getLogger
 
 DOMAIN = "lavronos"
 NAME = "LavronOS HA Bridge"
-VERSION = "0.1.0"
+VERSION = "0.1.4"
 
 CONF_LAVRONOS_URL = "lavronos_url"
 CONF_PAIRING_CODE = "pairing_code"

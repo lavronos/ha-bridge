@@ -17,7 +17,7 @@ Implemented:
 - Pairing with LavronOS through `POST /api/ha/pair`.
 - Bridge token storage in the Home Assistant config entry.
 - Initial Home Assistant snapshot push to LavronOS with area, device and entity registry context.
-- Periodic snapshot refresh so LavronOS catches area, device and entity registry changes without disconnecting and re-pairing the bridge.
+- Debounced snapshot refresh on Home Assistant area, device and entity registry changes, plus periodic snapshot refresh as a fallback.
 - Realtime `state_changed` event push to LavronOS with friendly names and registry context.
 - Diagnostics with sensitive token redaction.
 
@@ -49,6 +49,8 @@ Example LavronOS URL:
 ```text
 http://192.168.1.135:3000
 ```
+
+This is the URL of the LavronOS web app, not the Home Assistant URL. The bridge runs on the Home Assistant server and sends data out to LavronOS, so it must know where LavronOS is reachable on the local network. Home Assistant mobile and desktop clients do not remove this requirement because they are only clients for the Home Assistant UI.
 
 The pairing code is generated inside the LavronOS setup wizard.
 
@@ -83,7 +85,9 @@ The bridge token is stored inside Home Assistant config entry data. Home Assista
 
 ## Snapshot
 
-After setup, the bridge collects and sends an initial snapshot to LavronOS. It also refreshes the snapshot periodically while the integration is loaded, so new spaces, devices and registry changes can appear in LavronOS without creating a new pairing code.
+After setup, the bridge collects and sends an initial snapshot to LavronOS. It also refreshes the snapshot when Home Assistant area, device or entity registries change, and keeps a periodic refresh as a fallback while the integration is loaded. New spaces, devices and registry changes can appear in LavronOS without creating a new pairing code.
+
+When the bridge code itself is updated through HACS or a custom repository install, Home Assistant still needs an integration reload or restart so it loads the new Python files. That reload does not require disconnecting and re-pairing the LavronOS bridge.
 
 ```http
 POST {lavronos_url}/api/ha/snapshot

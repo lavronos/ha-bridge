@@ -12,12 +12,14 @@ from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
 from .api import LavronOSApiClient, LavronOSApiError
 from .const import LOGGER
 
+REGISTRY_UPDATED_EVENTS = ("area_registry_updated", "device_registry_updated", "entity_registry_updated")
 SNAPSHOT_INTERVAL = timedelta(minutes=1)
+SNAPSHOT_REFRESH_DELAY_SECONDS = 2
 
 
 class LavronOSBridgeCoordinator:
@@ -29,11 +31,17 @@ class LavronOSBridgeCoordinator:
         self.entry = entry
         self.client = client
         self._unsub_state_changed: Callable[[], None] | None = None
+        self._unsub_registry_changed: list[Callable[[], None]] = []
         self._unsub_snapshot_refresh: Callable[[], None] | None = None
+        self._unsub_snapshot_refresh_delay: Callable[[], None] | None = None
 
     async def async_start(self) -> None:
         """Start the bridge."""
         self._unsub_state_changed = self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._async_state_changed)
+        self._unsub_registry_changed = [
+            self.hass.bus.async_listen(event_type, self._async_registry_changed)
+            for event_type in REGISTRY_UPDATED_EVENTS
+        ]
         self._unsub_snapshot_refresh = async_track_time_interval(self.hass, self._async_refresh_snapshot, SNAPSHOT_INTERVAL)
         await self.async_push_snapshot()
 
@@ -42,9 +50,15 @@ class LavronOSBridgeCoordinator:
         if self._unsub_state_changed is not None:
             self._unsub_state_changed()
             self._unsub_state_changed = None
+        for unsubscribe in self._unsub_registry_changed:
+            unsubscribe()
+        self._unsub_registry_changed = []
         if self._unsub_snapshot_refresh is not None:
             self._unsub_snapshot_refresh()
             self._unsub_snapshot_refresh = None
+        if self._unsub_snapshot_refresh_delay is not None:
+            self._unsub_snapshot_refresh_delay()
+            self._unsub_snapshot_refresh_delay = None
 
     async def async_push_snapshot(self) -> None:
         """Collect and send an initial Home Assistant snapshot."""
@@ -75,7 +89,30 @@ class LavronOSBridgeCoordinator:
     @callback
     def _async_refresh_snapshot(self, _now: Any) -> None:
         """Refresh registry snapshots so LavronOS catches room/device changes without re-pairing."""
+        self._schedule_snapshot_refresh()
+
+    @callback
+    def _async_registry_changed(self, event: Event) -> None:
+        """Refresh snapshots when Home Assistant registry structure changes."""
+        LOGGER.debug("Home Assistant registry changed, scheduling snapshot refresh: %s", event.event_type)
+        self._schedule_snapshot_refresh()
+
+    @callback
+    def _async_run_scheduled_snapshot_refresh(self, _now: Any) -> None:
+        """Run a debounced registry snapshot refresh."""
+        self._unsub_snapshot_refresh_delay = None
         self.hass.async_create_task(self.async_push_snapshot())
+
+    @callback
+    def _schedule_snapshot_refresh(self) -> None:
+        """Debounce snapshot refreshes so registry bursts produce one snapshot."""
+        if self._unsub_snapshot_refresh_delay is not None:
+            self._unsub_snapshot_refresh_delay()
+        self._unsub_snapshot_refresh_delay = async_call_later(
+            self.hass,
+            SNAPSHOT_REFRESH_DELAY_SECONDS,
+            self._async_run_scheduled_snapshot_refresh,
+        )
 
     async def _async_push_state_event(self, payload: dict[str, Any]) -> None:
         """Push a state change payload to LavronOS."""
@@ -109,7 +146,7 @@ class LavronOSBridgeCoordinator:
                 },
             },
             "areas": [_serialize_area(area) for area in areas],
-            "devices": [_serialize_device(device) for device in devices],
+            "devices": [_serialize_device(device, area_by_id) for device in devices],
             "entities": [_serialize_entity(entity) for entity in entities],
             "states": [_serialize_state(state, entity_by_id, device_by_id, area_by_id) for state in states],
             "scenes": [_serialize_state(state, entity_by_id, device_by_id, area_by_id) for state in states if state.domain == "scene"],
@@ -185,11 +222,16 @@ def _serialize_area(area: Any) -> dict[str, Any]:
     }
 
 
-def _serialize_device(device: Any) -> dict[str, Any]:
+def _serialize_device(device: Any, area_by_id: dict[str, Any] | None = None) -> dict[str, Any]:
     """Serialize a device registry entry."""
+    area_id = _registry_field(device, "area_id", "areaId")
+    area = (area_by_id or {}).get(area_id)
+
     return {
         "id": _registry_id(device, "id", "device_id", "deviceId"),
-        "areaId": _registry_field(device, "area_id", "areaId"),
+        "areaId": area_id,
+        "areaName": _registry_field(area, "name") if area is not None else None,
+        "suggestedArea": _registry_field(device, "suggested_area", "suggestedArea"),
         "name": _registry_field(device, "name"),
         "nameByUser": _registry_field(device, "name_by_user", "nameByUser"),
         "manufacturer": _registry_field(device, "manufacturer"),

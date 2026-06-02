@@ -188,7 +188,7 @@ def _serialize_state(
         return None
 
     if isinstance(state, State):
-        data = state.as_dict()
+        data = dict(state.as_dict())
         entity = (entity_by_id or {}).get(state.entity_id)
         device_id = getattr(entity, "device_id", None) if entity is not None else None
         device = (device_by_id or {}).get(device_id)
